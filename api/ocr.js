@@ -50,7 +50,7 @@ module.exports = async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   const cfg = await client(req);
   if (req.method === 'GET') {
-    return res.status(200).json({ ocr: !!cfg, via: cfg ? cfg.via : null, store: !!process.env.BLOB_READ_WRITE_TOKEN, pin: !!process.env.EDIT_PIN });
+    return res.status(200).json({ ocr: !!cfg, via: cfg ? cfg.via : null, store: !!(process.env.BLOB_READ_WRITE_TOKEN || process.env.BLOB_STORE_ID), pin: !!process.env.EDIT_PIN });
   }
   if (req.method !== 'POST') return res.status(405).json({ error: 'method' });
   try {

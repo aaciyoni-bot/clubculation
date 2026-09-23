@@ -5,6 +5,19 @@ const { put, list } = require('@vercel/blob');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+let getVercelOidcToken = null;
+try { getVercelOidcToken = require('@vercel/oidc').getVercelOidcToken; } catch (e) {}
+
+// Blob credentials: a store-scoped read/write token, or the deployment's OIDC token + BLOB_STORE_ID.
+function storeConfigured() { return !!(process.env.BLOB_READ_WRITE_TOKEN || process.env.BLOB_STORE_ID); }
+async function blobOpts(req) {
+  if (process.env.BLOB_READ_WRITE_TOKEN) return {};
+  let t = null;
+  if (getVercelOidcToken) { try { t = await getVercelOidcToken(); } catch (e) {} }
+  if (!t && req && req.headers) t = req.headers['x-vercel-oidc-token'] || null;
+  if (!t) t = process.env.VERCEL_OIDC_TOKEN || null;
+  return t ? { oidcToken: t, storeId: process.env.BLOB_STORE_ID } : {};
+}
 
 const BLOB_PATH = 'weapon-pages/pages.json';
 
@@ -17,9 +30,9 @@ function bundled() {
   return { pages: {}, meta: {} };
 }
 
-async function readStore() {
-  if (!process.env.BLOB_READ_WRITE_TOKEN) return { state: bundled(), source: 'bundled' };
-  const { blobs } = await list({ prefix: BLOB_PATH, limit: 1 });
+async function readStore(req) {
+  if (!storeConfigured()) return { state: bundled(), source: 'bundled' };
+  const { blobs } = await list({ prefix: BLOB_PATH, limit: 1, ...(await blobOpts(req)) });
   if (!blobs.length) return { state: bundled(), source: 'bundled' };
   const res = await fetch(blobs[0].url + '?t=' + Date.now(), { cache: 'no-store' });
   if (!res.ok) throw new Error('blob read failed ' + res.status);
@@ -27,10 +40,11 @@ async function readStore() {
   return { state: { pages: state.pages || {}, meta: state.meta || {} }, source: 'blob' };
 }
 
-async function writeStore(state) {
+async function writeStore(state, req) {
   await put(BLOB_PATH, JSON.stringify(state), {
     access: 'public', addRandomSuffix: false, allowOverwrite: true,
     contentType: 'application/json', cacheControlMaxAge: 60,
+    ...(await blobOpts(req)),
   });
 }
 
@@ -47,16 +61,28 @@ module.exports = async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   try {
     if (req.method === 'GET') {
-      const { state, source } = await readStore();
-      return res.status(200).json({ ...state, source, writable: !!(process.env.BLOB_READ_WRITE_TOKEN && process.env.EDIT_PIN) });
+      const url = new URL(req.url, 'http://x');
+      const selftest = url.searchParams.get('selftest');
+      if (selftest != null) {
+        // diagnostics: with the PIN, re-write the current state and read it back
+        if (!pinOk(selftest)) return res.status(401).json({ error: 'pin' });
+        if (!storeConfigured()) return res.status(503).json({ error: 'no_store' });
+        const before = await readStore(req);
+        await writeStore(before.state, req);
+        const after = await readStore(req);
+        const n = Object.keys(after.state.pages).length;
+        return res.status(200).json({ ok: after.source === 'blob', before: before.source, after: after.source, pages: n });
+      }
+      const { state, source } = await readStore(req);
+      return res.status(200).json({ ...state, source, writable: !!(storeConfigured() && process.env.EDIT_PIN) });
     }
     if (req.method !== 'POST') return res.status(405).json({ error: 'method' });
     const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
     if (!pinOk(body.pin)) return res.status(401).json({ error: 'pin' });
-    if (!process.env.BLOB_READ_WRITE_TOKEN) return res.status(503).json({ error: 'no_store' });
+    if (!storeConfigured()) return res.status(503).json({ error: 'no_store' });
     const page = norm(body.page);
     if (!page) return res.status(400).json({ error: 'page' });
-    const { state } = await readStore();
+    const { state } = await readStore(req);
     if (body.action === 'delete') {
       delete state.pages[page]; delete state.meta[page];
     } else {
@@ -66,7 +92,7 @@ module.exports = async (req, res) => {
       state.pages[page] = serials;
       state.meta[page] = { added: new Date().toISOString().slice(0, 10), src: body.src === 'photo' ? 'photo' : 'manual' };
     }
-    await writeStore(state);
+    await writeStore(state, req);
     return res.status(200).json({ ...state, source: 'blob', writable: true });
   } catch (e) {
     console.error(e);
