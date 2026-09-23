@@ -20,6 +20,7 @@
   --bg:#14160f; --panel:#1e2117; --ink:#eceadf; --muted:#a3a595; --line:#343829;
   --accent:#8db56b; --accent-ink:#0f1409; --hit:#26311b; --warn:#f0b35a; --warn-bg:#332812; --bad:#f08a8a; --bad-bg:#3a1f1c;
 }
+[hidden]{display:none!important}
 html,body{height:100%}
 body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);direction:rtl;font-size:16px;line-height:1.45}
 .wrap{max-width:640px;margin:0 auto;padding-block:16px 48px;padding-inline:16px}
