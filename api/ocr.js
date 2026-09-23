@@ -3,11 +3,19 @@
 // deployment's OIDC token (billed to the Vercel account). Requires the edit PIN.
 const Anthropic = require('@anthropic-ai/sdk');
 const crypto = require('crypto');
+let getVercelOidcToken = null;
+try { getVercelOidcToken = require('@vercel/oidc').getVercelOidcToken; } catch (e) {}
 
-function client() {
+async function oidcToken(req) {
+  if (getVercelOidcToken) { try { const t = await getVercelOidcToken(); if (t) return t; } catch (e) {} }
+  const h = req && req.headers && req.headers['x-vercel-oidc-token'];
+  return h || process.env.VERCEL_OIDC_TOKEN || null;
+}
+
+async function client(req) {
   if (process.env.ANTHROPIC_API_KEY) return { c: new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }), model: 'claude-opus-5', via: 'anthropic' };
-  const key = process.env.AI_GATEWAY_API_KEY || process.env.VERCEL_OIDC_TOKEN;
-  if (key) return { c: new Anthropic({ apiKey: key, baseURL: 'https://ai-gateway.vercel.sh' }), model: 'anthropic/claude-opus-5', via: 'gateway' };
+  const key = process.env.AI_GATEWAY_API_KEY || await oidcToken(req);
+  if (key) return { c: new Anthropic({ apiKey: key, baseURL: 'https://ai-gateway.vercel.sh' }), model: 'anthropic/claude-opus-5', via: process.env.AI_GATEWAY_API_KEY ? 'gateway-key' : 'gateway-oidc' };
   return null;
 }
 
@@ -40,7 +48,7 @@ function extractJson(text) {
 
 module.exports = async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
-  const cfg = client();
+  const cfg = await client(req);
   if (req.method === 'GET') {
     return res.status(200).json({ ocr: !!cfg, via: cfg ? cfg.via : null, store: !!process.env.BLOB_READ_WRITE_TOKEN, pin: !!process.env.EDIT_PIN });
   }
