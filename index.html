@@ -61,7 +61,7 @@ summary .chev{color:var(--muted);font-size:13px;font-weight:500}
 .sec p{margin:0;font-size:14px;color:var(--muted)}
 .field{display:flex;flex-direction:column;gap:4px}
 .field label{font-size:13px;font-weight:700}
-input[type=text],input[type=number],textarea{box-sizing:border-box;font:15px/1.5 var(--sans);padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--ink)}
+input[type=text],input[type=number],input[type=password],textarea{box-sizing:border-box;font:15px/1.5 var(--sans);padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--ink)}
 input.num,textarea.num{font:700 18px/1.6 var(--mono);direction:ltr;text-align:left}
 textarea{width:100%;min-height:200px;resize:vertical}
 input[type=number]{width:120px}
@@ -135,6 +135,10 @@ label.btn input{position:absolute;width:1px;height:1px;opacity:0}
           <textarea id="serials" class="num" placeholder="5012345&#10;9876543"></textarea>
         </div>
         <div id="reviewNote" class="note" hidden></div>
+        <div class="row" id="pinRow" hidden>
+          <div class="field"><label for="pin">קוד עריכה</label><input type="password" id="pin" class="num" inputmode="numeric" autocomplete="off" style="width:140px"></div>
+          <span class="small">נדרש כדי לקרוא צילום, לשמור ולמחוק. נשמר בדפדפן הזה.</span>
+        </div>
         <div class="row">
           <button class="primary" id="save" disabled>שמור למאגר</button>
           <button id="clearForm">נקה</button>
@@ -251,35 +255,16 @@ label.btn input{position:absolute;width:1px;height:1px;opacity:0}
       $('pageNote').hidden=true;
     }
 
-    // ---- capabilities ----
-    var artifactNs=null, sampleFn=null, canWrite=false, imgLimits=null;
-    var addBox=$('addBox'), photoCard=$('photoCard');
+    // ---- backend: claude.ai runtime (artifact republish) or the site's own API ----
+    var canWrite=false, ocrAvailable=false, backend=null;
+    var addBox=$('addBox'), photoCard=$('photoCard'), pinRow=$('pinRow'), pinEl=$('pin');
+    try{ pinEl.value=localStorage.getItem('weapon-pin')||''; }catch(e){}
+    pinEl.addEventListener('input',function(){ try{ localStorage.setItem('weapon-pin',pinEl.value); }catch(e){} });
 
     function hideWrite(){ canWrite=false; addBox.hidden=true; $('deletePage').hidden=true; }
+    function enableWrite(){ canWrite=true; addBox.hidden=false; if(shownPage) showPage(shownPage); review(); }
+    function applyState(next){ STATE=next; if(!STATE.pages) STATE.pages={}; if(!STATE.meta) STATE.meta={}; build(); }
 
-    (async function(){
-      if(!window.claude || typeof window.claude.use!=='function') return;
-      var results = await Promise.all([claude.use('artifact'), claude.use('sample'), claude.use('user')].map(function(p){ return Promise.resolve(p).catch(function(){ return null; }); }));
-      artifactNs=results[0]; sampleFn=results[1]; var userNs=results[2];
-      if(!artifactNs) return;
-      var editable=null;
-      try{ if(userNs && typeof userNs.canEdit==='function') editable=await userNs.canEdit(); }catch(e){}
-      if(editable===false) return;
-      canWrite=true; addBox.hidden=false; if(shownPage) showPage(shownPage);
-      if(sampleFn){
-        try{ var lim=await sampleFn.limits(); imgLimits=lim&&lim.images?lim.images:null; }catch(e){ imgLimits=null; }
-        if(imgLimits){ photoCard.hidden=false; $('photo').accept=imgLimits.mediaTypes.join(','); }
-      }
-    })();
-
-    // ---- photo + OCR ----
-    var photoFile=null, ctl=null;
-    $('photo').addEventListener('change',function(e){
-      var f=e.target.files[0]; if(!f) return;
-      photoFile=f; $('photoName').textContent=f.name;
-      var img=$('preview'); img.src=URL.createObjectURL(f); img.hidden=false;
-      $('ocr').disabled=false; $('ocrStatus').textContent='';
-    });
     var OCR_PROMPT = [
       'This is a photo of an Israeli military inventory form (טופס לדיווח ארוע מלאי).',
       'The column headed זיהוי פריט (צ\'/מסד/סדרה/ע"מ) holds handwritten weapon serial numbers, one per row, top to bottom, usually 7 digits each.',
@@ -290,14 +275,106 @@ label.btn input{position:absolute;width:1px;height:1px;opacity:0}
       'Reply with only JSON of this shape: {"page": "<page number written in orange, as a string, or null if not visible>", "serials": [{"s": "<digits>", "sure": true}, {"s": "<digits>", "sure": false}]}',
       'Set "sure": false when any digit is ambiguous (especially 1 vs 4, 0 vs 6, 3 vs 8, 5 vs 6).'
     ].join('\n');
+
+    // claude.ai: the page republishes itself with the new data; Claude reads the photo on the viewer's account
+    function claudeBackend(artifactNs, sampleFn){
+      return {
+        name:'claude', needsPin:false,
+        ocr:function(file, signal){ return sampleFn.json(OCR_PROMPT,{images:[file],modelTier:'complex',signal:signal,cache:false}); },
+        save:function(next){ return artifactNs.publish(renderDoc(next)).then(function(){ return {reload:true}; }); },
+        errorText:function(e){ var code=e&&e.code;
+          if(code==='cancelled') return 'הקריאה בוטלה.';
+          if(code==='not_granted'||code==='sampling_disabled') return 'אין אישור להשתמש ב-Claude מהעמוד הזה. אפשר להקליד את הצ\' ידנית.';
+          if(code==='rate_limited') return 'יותר מדי בקשות כרגע. נסה שוב בעוד כמה דקות.';
+          if(code==='image_rejected') return 'התמונה לא התקבלה. נסה צילום אחר (JPG או PNG).';
+          if(code==='invalid_json') return 'התשובה לא הובנה. נסה שוב, או צלם מקרוב יותר.';
+          if(code==='conflict') return 'מישהו אחר שמר לפני רגע. העמוד נטען מחדש, נסה שוב אחר כך.';
+          if(code==='not_writer'||code==='not_granted'||code==='not_declared') return 'אין לך הרשאת עריכה לעמוד הזה.';
+          return 'הפעולה נכשלה. נסה שוב.'; },
+        fatal:function(e){ var c=e&&e.code; return c==='not_writer'||c==='not_granted'||c==='not_declared'||c==='sampling_disabled'; }
+      };
+    }
+
+    // the site's own API (Vercel): shared store + server-side OCR, protected by a PIN
+    function serverBackend(){
+      function post(url, body, signal){
+        return fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:signal}).then(function(r){
+          return r.json().catch(function(){ return {}; }).then(function(j){ if(!r.ok){ var e=new Error(j.error||('http '+r.status)); e.code=j.error||('http_'+r.status); e.status=r.status; e.detail=j.message||j.text; throw e; } return j; });
+        });
+      }
+      function shrink(file){
+        return new Promise(function(resolve,reject){
+          var img=new Image(); var url=URL.createObjectURL(file);
+          img.onload=function(){ URL.revokeObjectURL(url);
+            var MAX=2200, w=img.naturalWidth, h=img.naturalHeight, k=Math.min(1,MAX/Math.max(w,h));
+            var c=document.createElement('canvas'); c.width=Math.round(w*k); c.height=Math.round(h*k);
+            c.getContext('2d').drawImage(img,0,0,c.width,c.height);
+            resolve({data:c.toDataURL('image/jpeg',0.88).split(',')[1], mediaType:'image/jpeg'}); };
+          img.onerror=function(){ URL.revokeObjectURL(url); reject({code:'image_rejected'}); };
+          img.src=url;
+        });
+      }
+      return {
+        name:'server', needsPin:true,
+        ocr:function(file, signal){ return shrink(file).then(function(im){ return post('/api/ocr',{pin:pinEl.value,image:im.data,mediaType:im.mediaType},signal); }); },
+        save:function(next, change){ return post('/api/pages',Object.assign({pin:pinEl.value},change)).then(function(j){ return {state:{pages:j.pages,meta:j.meta}}; }); },
+        errorText:function(e){ var code=e&&e.code;
+          if(e&&e.name==='AbortError') return 'הקריאה בוטלה.';
+          if(code==='pin') return 'קוד עריכה שגוי.';
+          if(code==='no_store') return 'עדיין לא חובר מאגר לאתר (Vercel Blob). אי אפשר לשמור.';
+          if(code==='no_ocr') return 'קריאת צילום לא מוגדרת בשרת. אפשר להקליד את הצ\' ידנית.';
+          if(code==='auth'||code==='credits') return 'השרת לא הצליח להתחבר ל-Claude ('+(e.detail||code)+').';
+          if(code==='rate_limited') return 'יותר מדי בקשות כרגע. נסה שוב בעוד דקה.';
+          if(code==='refused') return 'הצילום לא נקרא. נסה צילום אחר.';
+          if(code==='invalid_json') return 'התשובה לא הובנה. נסה שוב, או צלם מקרוב יותר.';
+          if(code==='image'||code==='image_rejected') return 'התמונה לא התקבלה. נסה צילום אחר.';
+          if(code==='page'||code==='serials') return 'חסר מספר דף או צ\'.';
+          return 'הפעולה נכשלה'+(e&&e.detail?': '+e.detail:'.'); },
+        fatal:function(){ return false; }
+      };
+    }
+
+    (async function(){
+      if(window.claude && typeof window.claude.use==='function'){
+        var r = await Promise.all([claude.use('artifact'), claude.use('sample'), claude.use('user')].map(function(p){ return Promise.resolve(p).catch(function(){ return null; }); }));
+        if(!r[0]) return;
+        var editable=null; try{ if(r[2]&&typeof r[2].canEdit==='function') editable=await r[2].canEdit(); }catch(e){}
+        if(editable===false) return;
+        backend=claudeBackend(r[0], r[1]);
+        enableWrite();
+        if(r[1]){ try{ var lim=await r[1].limits(); if(lim&&lim.images){ ocrAvailable=true; photoCard.hidden=false; $('photo').accept=lim.images.mediaTypes.join(','); } }catch(e){} }
+        return;
+      }
+      if(location.protocol!=='http:' && location.protocol!=='https:') return;
+      try{
+        var res=await fetch('/api/pages',{cache:'no-store'}); if(!res.ok) return;
+        var j=await res.json();
+        if(j&&j.pages&&Object.keys(j.pages).length) applyState({pages:j.pages,meta:j.meta||{}});
+        backend=serverBackend(); pinRow.hidden=false;
+        enableWrite();
+        var st=await fetch('/api/ocr',{cache:'no-store'}).then(function(x){return x.json();}).catch(function(){return null;});
+        if(st&&st.ocr){ ocrAvailable=true; photoCard.hidden=false; }
+        if(st&&!st.store){ var n=$('reviewNote'); n.hidden=false; n.className='note'; n.textContent='שים לב: עדיין לא חובר מאגר (Vercel Blob) לאתר, אז שמירה לא תעבוד עד שיחובר.'; }
+      }catch(e){}
+    })();
+
+    // ---- photo + OCR ----
+    var photoFile=null, ctl=null;
+    $('photo').addEventListener('change',function(e){
+      var f=e.target.files[0]; if(!f) return;
+      photoFile=f; $('photoName').textContent=f.name;
+      var img=$('preview'); img.src=URL.createObjectURL(f); img.hidden=false;
+      $('ocr').disabled=false; $('ocrStatus').textContent='';
+    });
     $('ocrStop').addEventListener('click',function(){ if(ctl) ctl.abort(); });
     $('ocr').addEventListener('click',async function(){
-      if(!sampleFn || !photoFile) return;
+      if(!backend || !photoFile) return;
+      if(backend.needsPin && !pinEl.value){ $('ocrStatus').textContent='הקלד קודם את קוד העריכה למטה.'; pinEl.focus(); return; }
       ctl=new AbortController();
       $('ocr').disabled=true; $('ocrStop').hidden=false;
       $('ocrStatus').textContent='קורא את הצילום... זה לוקח בדרך כלל 20 עד 90 שניות.';
       try{
-        var out=await sampleFn.json(OCR_PROMPT,{images:[photoFile],modelTier:'complex',signal:ctl.signal,cache:false});
+        var out=await backend.ocr(photoFile, ctl.signal);
         var list=Array.isArray(out&&out.serials)?out.serials:[];
         var lines=list.map(function(x){ var s=norm(x&&x.s!=null?x.s:x); if(!s) return null; return (x&&x.sure===false)?s+' ?':s; }).filter(Boolean);
         $('serials').value=lines.join('\n');
@@ -307,15 +384,8 @@ label.btn input{position:absolute;width:1px;height:1px;opacity:0}
         review();
         $('serials').focus();
       }catch(e){
-        var code=e&&e.code;
-        var msg = code==='cancelled' ? 'הקריאה בוטלה.'
-          : code==='not_granted' || code==='sampling_disabled' ? 'אין אישור להשתמש ב-Claude מהעמוד הזה. אפשר להקליד את הצ\' ידנית.'
-          : code==='rate_limited' ? 'יותר מדי בקשות כרגע. נסה שוב בעוד כמה דקות.'
-          : code==='image_rejected' ? 'התמונה לא התקבלה. נסה צילום אחר (JPG או PNG).'
-          : code==='invalid_json' ? 'התשובה לא הובנה. נסה שוב, או צלם מקרוב יותר.'
-          : 'הקריאה נכשלה. נסה שוב.';
-        $('ocrStatus').textContent=msg;
-        if(code==='not_granted'||code==='sampling_disabled'||code==='not_declared'){ photoCard.hidden=true; }
+        $('ocrStatus').textContent=backend.errorText(e);
+        if(backend.fatal(e)) photoCard.hidden=true;
       }finally{ $('ocr').disabled=!photoFile; $('ocrStop').hidden=true; ctl=null; }
     });
 
@@ -335,42 +405,47 @@ label.btn input{position:absolute;width:1px;height:1px;opacity:0}
       var odd=list.filter(function(s){return s.length!==7;});
       if(odd.length) problems.push('לא 7 ספרות: '+odd.slice(0,8).join(', '));
       if(p && STATE.pages[p]) problems.push('דף '+p+' כבר קיים עם '+STATE.pages[p].length+' צ\'. שמירה תחליף אותו.');
-      note.hidden=!problems.length; note.className='note'; note.innerHTML=problems.map(esc).join('<br>');
-      $('save').disabled=!(p && list.length && canWrite);
+      if(problems.length){ note.hidden=false; note.className='note'; note.innerHTML=problems.map(esc).join('<br>'); }
+      else if(note.className==='note' && /כפילות|מסומנות|קיימים|ספרות|כבר קיים/.test(note.textContent)) note.hidden=true;
+      $('save').disabled=!(p && list.length && canWrite && backend && (!backend.needsPin || pinEl.value));
     }
     $('pageNum').addEventListener('input',review);
     $('serials').addEventListener('input',review);
+    pinEl.addEventListener('input',review);
     $('clearForm').addEventListener('click',function(){ $('pageNum').value=''; $('serials').value=''; $('reviewNote').hidden=true; $('saveStatus').textContent=''; photoFile=null; $('photo').value=''; $('preview').hidden=true; $('photoName').textContent=''; $('ocr').disabled=true; $('ocrStatus').textContent=''; review(); });
 
-    async function publish(next, statusEl, okText){
+    async function commit(next, change, statusEl, okText){
       statusEl.textContent='שומר...';
       try{
-        await artifactNs.publish(renderDoc(next));
-        statusEl.textContent=okText+' העמוד נטען מחדש.';
+        var r=await backend.save(next, change);
+        if(r&&r.state){ applyState(r.state); statusEl.textContent=okText; }
+        else statusEl.textContent=okText+' העמוד נטען מחדש.';
+        return true;
       }catch(e){
-        var code=e&&e.code;
-        if(code==='conflict'){ statusEl.textContent='מישהו אחר שמר לפני רגע. העמוד נטען מחדש, נסה שוב אחר כך.'; return; }
-        if(code==='not_writer'||code==='not_granted'||code==='not_declared'){ statusEl.textContent='אין לך הרשאת עריכה לעמוד הזה.'; hideWrite(); return; }
-        statusEl.textContent = code==='rate_limited' ? 'יותר מדי שמירות ברצף. חכה רגע ונסה שוב.' : 'השמירה נכשלה. נסה שוב.';
+        statusEl.textContent=backend.errorText(e);
+        if(backend.fatal(e)) hideWrite();
+        return false;
       }
     }
     $('save').addEventListener('click',async function(){
-      var p=norm($('pageNum').value), list=parsed(); if(!p||!list.length) return;
+      var p=norm($('pageNum').value), list=parsed(); if(!p||!list.length||!backend) return;
       if(STATE.pages[p] && !confirm('דף '+p+' כבר קיים. להחליף את הרשימה שלו?')) return;
       $('save').disabled=true;
-      var next=JSON.parse(JSON.stringify(STATE));
+      var next=JSON.parse(JSON.stringify(STATE)), src=photoFile?'photo':'manual';
       next.pages[p]=list;
-      next.meta[p]={added:new Date().toISOString().slice(0,10), src: photoFile?'photo':'manual'};
-      await publish(next,$('saveStatus'),'דף '+p+' נשמר עם '+list.length+' צ\'.');
-      $('save').disabled=false;
+      next.meta[p]={added:new Date().toISOString().slice(0,10), src:src};
+      var ok=await commit(next,{action:'save',page:p,serials:list,src:src},$('saveStatus'),'דף '+p+' נשמר עם '+list.length+' צ\'.');
+      if(ok && backend.name==='server'){ $('pageNum').value=''; $('serials').value=''; photoFile=null; $('photo').value=''; $('preview').hidden=true; $('photoName').textContent=''; $('ocr').disabled=true; $('ocrStatus').textContent=''; $('reviewNote').hidden=true; }
+      review();
     });
     $('deletePage').addEventListener('click',async function(){
-      var p=shownPage; if(!p) return;
+      var p=shownPage; if(!p||!backend) return;
+      if(backend.needsPin && !pinEl.value){ var n0=$('pageNote'); n0.hidden=false; n0.className='note'; n0.textContent='הקלד קודם את קוד העריכה בסעיף "הוספת דף למאגר".'; return; }
       if(!confirm('למחוק את דף '+p+' עם '+(STATE.pages[p]||[]).length+' צ\' מהמאגר?')) return;
       var next=JSON.parse(JSON.stringify(STATE));
       delete next.pages[p]; delete next.meta[p];
       var n=$('pageNote'); n.hidden=false; n.className='note ok';
-      await publish(next,n,'דף '+p+' נמחק.');
+      await commit(next,{action:'delete',page:p},n,'דף '+p+' נמחק.');
     });
 
     build();

@@ -1,0 +1,11 @@
+{
+  "name": "weapon-page-finder",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Find which inventory page a weapon serial number is on; add pages from photos.",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
+    "@vercel/blob": "^2.8.0"
+  },
+  "engines": { "node": ">=20" }
+}
