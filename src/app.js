@@ -2,10 +2,9 @@
   // ---- canonical source: this script's own text, captured before anything runs ----
   var SRC = document.currentScript ? document.currentScript.textContent : '';
   var DATA_EL = document.getElementById('pages-data');
-  var STATE = {pages:{}, meta:{}};
-  try { STATE = JSON.parse(DATA_EL ? DATA_EL.textContent : '{}'); } catch(e) {}
-  if(!STATE.pages) STATE.pages = {};
-  if(!STATE.meta) STATE.meta = {};
+  var M = window.PagesModel;
+  var STATE = M.empty();
+  try { STATE = M.upgrade(JSON.parse(DATA_EL ? DATA_EL.textContent : '{}')); } catch(e) {}
 
   var STYLE = `
 :root{
@@ -70,7 +69,13 @@ label.btn input{position:absolute;width:1px;height:1px;opacity:0}
 .note{font-size:14px;padding:10px 12px;border-radius:9px;background:var(--warn-bg);color:var(--warn);border:1px solid color-mix(in srgb,var(--warn) 40%,transparent)}
 .note.ok{background:var(--hit);color:var(--ink);border-color:var(--accent)}
 .note.bad{background:var(--bad-bg);color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,transparent)}
-.pages{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.series{border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-top:8px;background:var(--panel)}
+.series .head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.series .head h3{margin:0;font-size:15px}
+.series .head .small{font-variant-numeric:tabular-nums}
+.series button.mini{font-size:12px;padding:4px 10px}
+select{font:15px var(--sans);padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--ink);min-width:170px}
+.pages{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
 .pages button{font:600 13px var(--mono);padding:3px 10px;border-radius:999px;color:var(--muted)}
 .pages button[aria-pressed=true]{color:var(--accent-ink);background:var(--accent);border-color:var(--accent)}
 .preview{max-width:100%;max-height:260px;border-radius:10px;border:1px solid var(--line);display:block}
@@ -120,7 +125,11 @@ label.btn input{position:absolute;width:1px;height:1px;opacity:0}
 
       <div class="card">
         <h2 id="reviewTitle">2. בדיקה ושמירה</h2>
-        <p id="reviewHint">אפשר גם בלי צילום: להקליד מספר דף ואת הצ' ידנית, אחד בכל שורה.</p>
+        <p id="reviewHint">אפשר גם בלי צילום: להקליד מספר דף ואת הצ' ידנית, אחד בכל שורה. כל דף שייך לסדרה (למשל תאריך), כך שמספרי דפים יכולים לחזור על עצמם בסדרות שונות.</p>
+        <div class="row">
+          <div class="field"><label for="seriesSel">סדרה</label><select id="seriesSel"></select></div>
+          <div class="field" id="seriesNameField"><label for="seriesName">שם הסדרה החדשה</label><input type="text" id="seriesName" style="width:170px" maxlength="60"></div>
+        </div>
         <div class="row">
           <div class="field"><label for="pageNum">מספר דף</label><input type="text" id="pageNum" class="num" inputmode="numeric" style="width:110px"></div>
           <div class="field"><label>&nbsp;</label><span class="small" id="serialCount"></span></div>
@@ -146,8 +155,8 @@ label.btn input{position:absolute;width:1px;height:1px;opacity:0}
   <details id="pagesBox">
     <summary><span>דפים במאגר</span><span class="chev">פתח / סגור</span></summary>
     <div class="sec">
-      <p id="pagesHint">לחיצה על דף מציגה את כל הצ' שבו.</p>
-      <div class="pages" id="pages"></div>
+      <p id="pagesHint">הדפים מקובצים לפי סדרה, החדשה למעלה. לחיצה על דף מציגה את כל הצ' שבו.</p>
+      <div id="seriesList"></div>
       <div id="pageView" hidden class="card">
         <div class="row" style="justify-content:space-between">
           <h2 id="pageViewTitle"></h2>
@@ -181,36 +190,39 @@ label.btn input{position:absolute;width:1px;height:1px;opacity:0}
 
   function app(){
     var $ = function(id){ return document.getElementById(id); };
-    var q=$('q'), result=$('result'), matches=$('matches'), more=$('more'), stat=$('stat'), pagesEl=$('pages');
+    var q=$('q'), result=$('result'), matches=$('matches'), more=$('more'), stat=$('stat');
     var rows=[], byExact=new Map();
-
-    function norm(s){ return String(s==null?'':s).toUpperCase().replace(/[^0-9A-Zא-ת]/g,''); }
-    function esc(s){ return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]}); }
+    var norm=M.norm, esc=function(x){ return String(x).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]}); };
     function pageSort(a,b){ return (parseFloat(a)||0)-(parseFloat(b)||0) || String(a).localeCompare(String(b)); }
-    function pageIds(){ return Object.keys(STATE.pages).sort(pageSort); }
+    function seriesIds(){ return Object.keys(STATE.series).sort(function(a,b){ return String(STATE.series[b].created||'').localeCompare(String(STATE.series[a].created||'')) || b.localeCompare(a); }); }
+    function seriesName(sid){ var x=STATE.series[sid]; return x&&x.name ? x.name : 'סדרה'; }
+    function pagesOf(sid){ return Object.keys(STATE.pages).filter(function(k){ return M.split(k).sid===sid; }).map(function(k){ return M.split(k).p; }).sort(pageSort); }
+    function today(){ try{ return new Date().toLocaleDateString('he-IL',{timeZone:'Asia/Jerusalem'}); }catch(e){ return new Date().toISOString().slice(0,10); } }
 
     function build(){
       rows=[]; byExact=new Map();
-      pageIds().forEach(function(p){ (STATE.pages[p]||[]).forEach(function(s,i){ rows.push({s:norm(s),p:p,i:i+1}); }); });
+      seriesIds().forEach(function(sid){ pagesOf(sid).forEach(function(p){ (STATE.pages[M.key(sid,p)]||[]).forEach(function(x,i){ rows.push({s:norm(x),sid:sid,p:p,i:i+1}); }); }); });
       rows.forEach(function(r){ var a=byExact.get(r.s); if(!a){a=[];byExact.set(r.s,a);} a.push(r); });
-      var n=pageIds().length;
-      stat.textContent = rows.length ? (rows.length+' צ\' ב-'+n+' דפים') : 'אין נתונים';
-      renderPages();
+      var np=Object.keys(STATE.pages).length, ns=seriesIds().length;
+      stat.textContent = rows.length ? (rows.length+' צ\' ב-'+np+' דפים, '+ns+' סדרות') : 'המאגר ריק';
+      renderSeriesPicker();
+      renderBrowser();
       search();
     }
 
     // ---- search ----
     var LIMIT=40;
+    function where(r){ return '<span>'+esc(seriesName(r.sid))+' · דף</span>'+esc(r.p); }
     function search(){
       var t=norm(q.value);
       matches.innerHTML=''; more.textContent='';
-      if(!rows.length){ result.className='result'; result.innerHTML='<div class="hint">המאגר ריק. הוסף דף למטה.</div>'; return; }
+      if(!rows.length){ result.className='result'; result.innerHTML='<div class="hint">המאגר ריק. הוסף דף בסעיף "הוספת דף למאגר".</div>'; return; }
       if(!t){ result.className='result'; result.innerHTML='<div class="hint">הקלד מספר צ\' (או רק את הספרות האחרונות) והדף יופיע כאן.</div>'; return; }
       var exact=byExact.get(t)||[];
       if(exact.length){
         var r=exact[0];
         result.className='result exact';
-        result.innerHTML='<div class="label">נמצא בדף</div><div class="page">'+esc(r.p)+'<small>שורה '+r.i+'</small></div><div class="meta">צ\' <span class="num">'+esc(r.s)+'</span>'+(exact.length>1?' — מופיע גם ב: '+exact.slice(1).map(function(x){return 'דף '+esc(x.p);}).join(', '):'')+'</div>';
+        result.innerHTML='<div class="label">'+esc(seriesName(r.sid))+' · נמצא בדף</div><div class="page">'+esc(r.p)+'<small>שורה '+r.i+'</small></div><div class="meta">צ\' <span class="num">'+esc(r.s)+'</span>'+(exact.length>1?' — מופיע גם ב: '+exact.slice(1).map(function(x){return esc(seriesName(x.sid))+' דף '+esc(x.p);}).join(', '):'')+'</div>';
       } else { result.className='result'; result.innerHTML=''; }
       var partial=[], n=0;
       for(var k=0;k<rows.length;k++){ var row=rows[k]; if(row.s===t) continue; if(row.s.indexOf(t)!==-1){ n++; if(partial.length<LIMIT) partial.push(row); } }
@@ -222,7 +234,7 @@ label.btn input{position:absolute;width:1px;height:1px;opacity:0}
       }
       matches.innerHTML=partial.map(function(r){
         var i=r.s.indexOf(t), hl=esc(r.s.slice(0,i))+'<mark>'+esc(t)+'</mark>'+esc(r.s.slice(i+t.length));
-        return '<li tabindex="0" data-s="'+esc(r.s)+'"><span class="serial">'+hl+'</span><span class="pg"><span>דף</span>'+esc(r.p)+'</span></li>';
+        return '<li tabindex="0" data-s="'+esc(r.s)+'"><span class="serial">'+hl+'</span><span class="pg">'+where(r)+'</span></li>';
       }).join('');
       if(n>LIMIT) more.textContent='מוצגים '+LIMIT+' מתוך '+n+'. הקלד עוד ספרות כדי לצמצם.';
     }
@@ -231,21 +243,48 @@ label.btn input{position:absolute;width:1px;height:1px;opacity:0}
     matches.addEventListener('click',pick);
     matches.addEventListener('keydown',function(e){ if(e.key==='Enter') pick(e); });
 
-    // ---- pages browser ----
-    var shownPage=null;
-    function renderPages(){
-      pagesEl.innerHTML = pageIds().map(function(p){ return '<button type="button" data-p="'+esc(p)+'" aria-pressed="'+(p===shownPage)+'">'+esc(p)+'</button>'; }).join('');
-      if(shownPage && !STATE.pages[shownPage]) shownPage=null;
-      showPage(shownPage);
+    // ---- series picker (add form) ----
+    var seriesSel=$('seriesSel'), seriesNameEl=$('seriesName'), seriesNameField=$('seriesNameField');
+    function renderSeriesPicker(){
+      var cur=seriesSel.value;
+      seriesSel.innerHTML='<option value="__new__">סדרה חדשה…</option>'+seriesIds().map(function(sid){ return '<option value="'+esc(sid)+'">'+esc(seriesName(sid))+' ('+pagesOf(sid).length+')</option>'; }).join('');
+      var ids=seriesIds();
+      if(cur && (cur==='__new__'||STATE.series[cur])) seriesSel.value=cur;
+      else seriesSel.value = ids.length ? ids[0] : '__new__';
+      if(!seriesNameEl.value) seriesNameEl.value=today();
+      seriesNameField.hidden = seriesSel.value!=='__new__';
     }
-    pagesEl.addEventListener('click',function(e){ var b=e.target.closest('button'); if(!b) return; shownPage = (shownPage===b.getAttribute('data-p')) ? null : b.getAttribute('data-p'); renderPages(); });
-    function showPage(p){
+    seriesSel.addEventListener('change',function(){ seriesNameField.hidden = seriesSel.value!=='__new__'; if(seriesSel.value==='__new__'){ if(!seriesNameEl.value) seriesNameEl.value=today(); seriesNameEl.focus(); } review(); });
+    seriesNameEl.addEventListener('input',review);
+    function chosenSeries(){ return seriesSel.value==='__new__' ? {seriesName:seriesNameEl.value.trim()} : {seriesId:seriesSel.value}; }
+
+    // ---- pages browser ----
+    var shown=null; // {sid,p}
+    var seriesListEl=$('seriesList');
+    function renderBrowser(){
+      seriesListEl.innerHTML = seriesIds().map(function(sid){
+        var ps=pagesOf(sid), n=ps.reduce(function(a,p){ return a+(STATE.pages[M.key(sid,p)]||[]).length; },0), m=STATE.series[sid]||{};
+        return '<div class="series" data-sid="'+esc(sid)+'"><div class="head"><h3>'+esc(seriesName(sid))+'</h3><span class="small">'+ps.length+' דפים · '+n+' צ\''+(m.created?' · '+esc(m.created):'')+'</span>'+(canWrite?'<button type="button" class="danger mini" data-del-series="'+esc(sid)+'">מחק סדרה</button>':'')+'</div>'+
+          '<div class="pages">'+ps.map(function(p){ var on=shown&&shown.sid===sid&&shown.p===p; return '<button type="button" data-sid="'+esc(sid)+'" data-p="'+esc(p)+'" aria-pressed="'+on+'">'+esc(p)+'</button>'; }).join('')+'</div></div>';
+      }).join('') || '<p class="small">אין דפים עדיין.</p>';
+      if(shown && !STATE.pages[M.key(shown.sid,shown.p)]) shown=null;
+      showPage(shown);
+    }
+    seriesListEl.addEventListener('click',function(e){
+      var d=e.target.closest('button[data-del-series]'); if(d){ deleteSeries(d.getAttribute('data-del-series')); return; }
+      var b=e.target.closest('button[data-p]'); if(!b) return;
+      var sid=b.getAttribute('data-sid'), p=b.getAttribute('data-p');
+      shown = (shown&&shown.sid===sid&&shown.p===p) ? null : {sid:sid,p:p};
+      renderBrowser();
+      if(shown) $('pageView').scrollIntoView({block:'nearest'});
+    });
+    function showPage(sp){
       var box=$('pageView');
-      if(!p){ box.hidden=true; return; }
+      if(!sp){ box.hidden=true; return; }
       box.hidden=false;
-      var list=STATE.pages[p]||[], m=STATE.meta[p]||{};
-      $('pageViewTitle').textContent='דף '+p+' · '+list.length+' צ\''+(m.added?' · נוסף '+m.added:'');
-      $('pageList').innerHTML=list.map(function(s,i){ return '<li>'+esc(s)+'<span>'+(i+1)+'</span></li>'; }).join('');
+      var list=STATE.pages[M.key(sp.sid,sp.p)]||[], m=STATE.meta[M.key(sp.sid,sp.p)]||{};
+      $('pageViewTitle').textContent=seriesName(sp.sid)+' · דף '+sp.p+' · '+list.length+' צ\''+(m.added?' · נוסף '+m.added:'');
+      $('pageList').innerHTML=list.map(function(x,i){ return '<li>'+esc(x)+'<span>'+(i+1)+'</span></li>'; }).join('');
       $('deletePage').hidden=!canWrite;
       $('pageNote').hidden=true;
     }
@@ -257,8 +296,8 @@ label.btn input{position:absolute;width:1px;height:1px;opacity:0}
     pinEl.addEventListener('input',function(){ try{ localStorage.setItem('weapon-pin',pinEl.value); }catch(e){} });
 
     function hideWrite(){ canWrite=false; addBox.hidden=true; $('deletePage').hidden=true; }
-    function enableWrite(){ canWrite=true; addBox.hidden=false; if(shownPage) showPage(shownPage); review(); }
-    function applyState(next){ STATE=next; if(!STATE.pages) STATE.pages={}; if(!STATE.meta) STATE.meta={}; build(); }
+    function enableWrite(){ canWrite=true; addBox.hidden=false; renderBrowser(); review(); }
+    function applyState(next){ STATE=M.upgrade(next); build(); }
 
     var OCR_PROMPT = [
       'This is a photo of an Israeli military inventory form (טופס לדיווח ארוע מלאי).',
@@ -312,7 +351,7 @@ label.btn input{position:absolute;width:1px;height:1px;opacity:0}
       return {
         name:'server', needsPin:true,
         ocr:function(file, signal){ return shrink(file).then(function(im){ return post('/api/ocr',{pin:pinEl.value,image:im.data,mediaType:im.mediaType},signal); }); },
-        save:function(next, change){ return post('/api/pages',Object.assign({pin:pinEl.value},change)).then(function(j){ return {state:{pages:j.pages,meta:j.meta}}; }); },
+        save:function(next, change){ return post('/api/pages',Object.assign({pin:pinEl.value},change)).then(function(j){ return {state:{v:2,series:j.series,pages:j.pages,meta:j.meta}}; }); },
         errorText:function(e){ var code=e&&e.code;
           if(e&&e.name==='AbortError') return 'הקריאה בוטלה.';
           if(code==='pin') return 'קוד עריכה שגוי.';
@@ -323,7 +362,7 @@ label.btn input{position:absolute;width:1px;height:1px;opacity:0}
           if(code==='refused') return 'הצילום לא נקרא. נסה צילום אחר.';
           if(code==='invalid_json') return 'התשובה לא הובנה. נסה שוב, או צלם מקרוב יותר.';
           if(code==='image'||code==='image_rejected') return 'התמונה לא התקבלה. נסה צילום אחר.';
-          if(code==='page'||code==='serials') return 'חסר מספר דף או צ\'.';
+          if(code==='page'||code==='serials'||code==='series') return 'חסר שם סדרה, מספר דף או צ\'.';
           return 'הפעולה נכשלה'+(e&&e.detail?': '+e.detail:'.'); },
         fatal:function(){ return false; }
       };
@@ -344,7 +383,7 @@ label.btn input{position:absolute;width:1px;height:1px;opacity:0}
       try{
         var res=await fetch('/api/pages',{cache:'no-store'}); if(!res.ok) return;
         var j=await res.json();
-        if(j&&j.pages&&Object.keys(j.pages).length) applyState({pages:j.pages,meta:j.meta||{}});
+        if(j&&j.v===2) applyState({v:2,series:j.series,pages:j.pages,meta:j.meta});
         backend=serverBackend(); pinRow.hidden=false;
         enableWrite();
         var st=await fetch('/api/ocr',{cache:'no-store'}).then(function(x){return x.json();}).catch(function(){return null;});
@@ -390,29 +429,34 @@ label.btn input{position:absolute;width:1px;height:1px;opacity:0}
     }
     function review(){
       var p=norm($('pageNum').value), list=parsed(), note=$('reviewNote'), problems=[];
+      var cs=chosenSeries(), sid=cs.seriesId||null, sname=cs.seriesId?seriesName(cs.seriesId):cs.seriesName;
       $('serialCount').textContent=list.length?list.length+' צ\'':'';
       var unsure=$('serials').value.split(/\r?\n/).filter(function(l){return /\?\s*$/.test(l);}).length;
       if(unsure) problems.push(unsure+' שורות מסומנות ב-? (לא בטוח בקריאה). ה-? יוסר בשמירה.');
-      var seen={}, dupIn=[]; list.forEach(function(s){ if(seen[s]) dupIn.push(s); seen[s]=1; });
+      var seen={}, dupIn=[]; list.forEach(function(x){ if(seen[x]) dupIn.push(x); seen[x]=1; });
       if(dupIn.length) problems.push('כפילות בתוך הדף: '+dupIn.join(', '));
-      var elsewhere=[]; list.forEach(function(s){ (byExact.get(s)||[]).forEach(function(r){ if(r.p!==p) elsewhere.push(s+' (דף '+r.p+')'); }); });
-      if(elsewhere.length) problems.push('כבר קיימים בדף אחר: '+elsewhere.slice(0,8).join(', ')+(elsewhere.length>8?' ועוד':''));
-      var odd=list.filter(function(s){return s.length!==7;});
+      var elsewhere=[]; list.forEach(function(x){ (byExact.get(x)||[]).forEach(function(r){ if(!(r.sid===sid && r.p===p)) elsewhere.push(x+' ('+seriesName(r.sid)+' דף '+r.p+')'); }); });
+      if(elsewhere.length) problems.push('כבר קיימים במאגר: '+elsewhere.slice(0,8).join(', ')+(elsewhere.length>8?' ועוד':''));
+      var odd=list.filter(function(x){return x.length!==7;});
       if(odd.length) problems.push('לא 7 ספרות: '+odd.slice(0,8).join(', '));
-      if(p && STATE.pages[p]) problems.push('דף '+p+' כבר קיים עם '+STATE.pages[p].length+' צ\'. שמירה תחליף אותו.');
+      if(sid && p && STATE.pages[M.key(sid,p)]) problems.push('דף '+p+' כבר קיים בסדרה "'+sname+'" עם '+STATE.pages[M.key(sid,p)].length+' צ\'. שמירה תחליף אותו.');
+      if(!sid && sname){ var clash=seriesIds().filter(function(x){ return seriesName(x)===sname; }); if(clash.length) problems.push('כבר יש סדרה בשם "'+sname+'". אם התכוונת אליה, בחר אותה ברשימה במקום ליצור חדשה.'); }
       if(problems.length){ note.hidden=false; note.className='note'; note.innerHTML=problems.map(esc).join('<br>'); }
-      else if(note.className==='note' && /כפילות|מסומנות|קיימים|ספרות|כבר קיים/.test(note.textContent)) note.hidden=true;
-      $('save').disabled=!(p && list.length && canWrite && backend && (!backend.needsPin || pinEl.value));
+      else if(note.className==='note' && /כפילות|מסומנות|קיימים|ספרות|כבר קיים|כבר יש/.test(note.textContent)) note.hidden=true;
+      $('save').disabled=!(p && list.length && sname && canWrite && backend && (!backend.needsPin || pinEl.value));
     }
     $('pageNum').addEventListener('input',review);
     $('serials').addEventListener('input',review);
     pinEl.addEventListener('input',review);
-    $('clearForm').addEventListener('click',function(){ $('pageNum').value=''; $('serials').value=''; $('reviewNote').hidden=true; $('saveStatus').textContent=''; photoFile=null; $('photo').value=''; $('preview').hidden=true; $('photoName').textContent=''; $('ocr').disabled=true; $('ocrStatus').textContent=''; review(); });
+    function resetForm(keepSeries){ $('pageNum').value=''; $('serials').value=''; $('reviewNote').hidden=true; photoFile=null; $('photo').value=''; $('preview').hidden=true; $('photoName').textContent=''; $('ocr').disabled=true; $('ocrStatus').textContent=''; if(!keepSeries){ seriesNameEl.value=''; renderSeriesPicker(); } review(); }
+    $('clearForm').addEventListener('click',function(){ $('saveStatus').textContent=''; resetForm(false); });
 
-    async function commit(next, change, statusEl, okText){
+    async function commit(change, statusEl, okText){
       statusEl.textContent='שומר...';
+      var local=M.apply(STATE, change, today());
+      if(local.error){ statusEl.textContent='חסר שם סדרה, מספר דף או צ\'.'; return false; }
       try{
-        var r=await backend.save(next, change);
+        var r=await backend.save(local.state, change);
         if(r&&r.state){ applyState(r.state); statusEl.textContent=okText; }
         else statusEl.textContent=okText+' העמוד נטען מחדש.';
         return true;
@@ -424,24 +468,34 @@ label.btn input{position:absolute;width:1px;height:1px;opacity:0}
     }
     $('save').addEventListener('click',async function(){
       var p=norm($('pageNum').value), list=parsed(); if(!p||!list.length||!backend) return;
-      if(STATE.pages[p] && !confirm('דף '+p+' כבר קיים. להחליף את הרשימה שלו?')) return;
+      var cs=chosenSeries(); if(!cs.seriesId && !cs.seriesName) return;
+      if(cs.seriesId && STATE.pages[M.key(cs.seriesId,p)] && !confirm('דף '+p+' כבר קיים בסדרה "'+seriesName(cs.seriesId)+'". להחליף את הרשימה שלו?')) return;
       $('save').disabled=true;
-      var next=JSON.parse(JSON.stringify(STATE)), src=photoFile?'photo':'manual';
-      next.pages[p]=list;
-      next.meta[p]={added:new Date().toISOString().slice(0,10), src:src};
-      var ok=await commit(next,{action:'save',page:p,serials:list,src:src},$('saveStatus'),'דף '+p+' נשמר עם '+list.length+' צ\'.');
-      if(ok && backend.name==='server'){ $('pageNum').value=''; $('serials').value=''; photoFile=null; $('photo').value=''; $('preview').hidden=true; $('photoName').textContent=''; $('ocr').disabled=true; $('ocrStatus').textContent=''; $('reviewNote').hidden=true; }
+      var change=Object.assign({action:'save',page:p,serials:list,src:photoFile?'photo':'manual'},cs);
+      var ok=await commit(change,$('saveStatus'),'דף '+p+' נשמר עם '+list.length+' צ\'.');
+      if(ok && backend.name==='server'){
+        // keep the series selected so the next page goes to the same one
+        var newest=seriesIds().find(function(x){ return seriesName(x)===(cs.seriesName||seriesName(cs.seriesId)); });
+        if(newest){ seriesSel.value=newest; seriesNameField.hidden=true; }
+        resetForm(true);
+      }
       review();
     });
     $('deletePage').addEventListener('click',async function(){
-      var p=shownPage; if(!p||!backend) return;
+      var sp=shown; if(!sp||!backend) return;
       if(backend.needsPin && !pinEl.value){ var n0=$('pageNote'); n0.hidden=false; n0.className='note'; n0.textContent='הקלד קודם את קוד העריכה בסעיף "הוספת דף למאגר".'; return; }
-      if(!confirm('למחוק את דף '+p+' עם '+(STATE.pages[p]||[]).length+' צ\' מהמאגר?')) return;
-      var next=JSON.parse(JSON.stringify(STATE));
-      delete next.pages[p]; delete next.meta[p];
+      if(!confirm('למחוק את דף '+sp.p+' מסדרה "'+seriesName(sp.sid)+'" ('+(STATE.pages[M.key(sp.sid,sp.p)]||[]).length+' צ\')?')) return;
       var n=$('pageNote'); n.hidden=false; n.className='note ok';
-      await commit(next,{action:'delete',page:p},n,'דף '+p+' נמחק.');
+      await commit({action:'delete',seriesId:sp.sid,page:sp.p},n,'דף '+sp.p+' נמחק.');
     });
+    async function deleteSeries(sid){
+      if(!backend) return;
+      if(backend.needsPin && !pinEl.value){ alert('הקלד קודם את קוד העריכה בסעיף "הוספת דף למאגר".'); return; }
+      var ps=pagesOf(sid);
+      if(!confirm('למחוק את הסדרה "'+seriesName(sid)+'" עם '+ps.length+' דפים? אי אפשר לבטל.')) return;
+      var n=$('pageNote'); $('pageView').hidden=false; n.hidden=false; n.className='note ok';
+      await commit({action:'deleteSeries',seriesId:sid},n,'הסדרה נמחקה.');
+    }
 
     build();
     review();

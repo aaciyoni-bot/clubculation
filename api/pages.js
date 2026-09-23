@@ -5,6 +5,7 @@ const { put, list } = require('@vercel/blob');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { PagesModel } = require('../src/model.js');
 let getVercelOidcToken = null;
 try { getVercelOidcToken = require('@vercel/oidc').getVercelOidcToken; } catch (e) {}
 
@@ -27,7 +28,7 @@ function bundled() {
     const m = html.match(/<script id="pages-data" type="application\/json">([\s\S]*?)<\/script>/);
     if (m) return JSON.parse(m[1]);
   } catch (e) {}
-  return { pages: {}, meta: {} };
+  return PagesModel.empty();
 }
 
 async function readStore(req) {
@@ -36,8 +37,8 @@ async function readStore(req) {
   if (!blobs.length) return { state: bundled(), source: 'bundled' };
   const res = await fetch(blobs[0].url + '?t=' + Date.now(), { cache: 'no-store' });
   if (!res.ok) throw new Error('blob read failed ' + res.status);
-  const state = await res.json();
-  return { state: { pages: state.pages || {}, meta: state.meta || {} }, source: 'blob' };
+  const state = PagesModel.upgrade(await res.json());
+  return { state, source: 'blob' };
 }
 
 async function writeStore(state, req) {
@@ -68,30 +69,23 @@ module.exports = async (req, res) => {
         if (!pinOk(selftest)) return res.status(401).json({ error: 'pin' });
         if (!storeConfigured()) return res.status(503).json({ error: 'no_store' });
         const before = await readStore(req);
-        await writeStore(before.state, req);
+        await writeStore(PagesModel.upgrade(before.state), req);
         const after = await readStore(req);
         const n = Object.keys(after.state.pages).length;
         return res.status(200).json({ ok: after.source === 'blob', before: before.source, after: after.source, pages: n });
       }
       const { state, source } = await readStore(req);
-      return res.status(200).json({ ...state, source, writable: !!(storeConfigured() && process.env.EDIT_PIN) });
+      return res.status(200).json({ ...PagesModel.upgrade(state), source, writable: !!(storeConfigured() && process.env.EDIT_PIN) });
     }
     if (req.method !== 'POST') return res.status(405).json({ error: 'method' });
     const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
     if (!pinOk(body.pin)) return res.status(401).json({ error: 'pin' });
     if (!storeConfigured()) return res.status(503).json({ error: 'no_store' });
-    const page = norm(body.page);
-    if (!page) return res.status(400).json({ error: 'page' });
-    const { state } = await readStore(req);
-    if (body.action === 'delete') {
-      delete state.pages[page]; delete state.meta[page];
-    } else {
-      const serials = (Array.isArray(body.serials) ? body.serials : []).map(norm).filter(Boolean);
-      if (!serials.length) return res.status(400).json({ error: 'serials' });
-      if (serials.length > 500) return res.status(400).json({ error: 'too_many' });
-      state.pages[page] = serials;
-      state.meta[page] = { added: new Date().toISOString().slice(0, 10), src: body.src === 'photo' ? 'photo' : 'manual' };
-    }
+    const { state: current } = await readStore(req);
+    const today = new Date().toLocaleDateString('he-IL', { timeZone: 'Asia/Jerusalem' });
+    const r = PagesModel.apply(current, body, today);
+    if (r.error) return res.status(400).json({ error: r.error });
+    const state = r.state;
     await writeStore(state, req);
     return res.status(200).json({ ...state, source: 'blob', writable: true });
   } catch (e) {
