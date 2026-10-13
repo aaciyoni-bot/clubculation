@@ -5,7 +5,15 @@ root = pathlib.Path(__file__).parent
 src = (root/'src/model.js').read_text(encoding='utf-8') + '\n' + (root/'src/app.js').read_text(encoding='utf-8')
 # The live list lives in the shared store (server) or in the page itself (claude.ai). The page ships empty.
 # data.js keeps the retired 2026-09-17 transcription (21 pages) as an archive.
-state = json.dumps({'v': 2, 'series': {}, 'pages': {}, 'meta': {}}, separators=(',',':'))
+seed = json.loads((root/'src/seed.json').read_text(encoding='utf-8')) if (root/'src/seed.json').exists() else None
+st = {'v': 2, 'series': {}, 'pages': {}, 'meta': {}}
+if seed:
+    # a bundled series: the server merges it into the shared store once (tracked in state.seeds)
+    st['series'][seed['id']] = {'name': seed['name'], 'created': seed['created']}
+    for pg, serials in seed['pages'].items():
+        st['pages'][seed['id'] + '/' + pg] = serials
+        st['meta'][seed['id'] + '/' + pg] = {'added': seed['created'], 'src': seed.get('src', 'manual')}
+state = json.dumps(st, ensure_ascii=False, separators=(',',':')).replace('<','\\u003c')
 head = ('<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n'
         "<title>מאתר צ' נשק</title>\n"
         '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;700;900&family=IBM+Plex+Mono:wght@500;700&display=swap">')

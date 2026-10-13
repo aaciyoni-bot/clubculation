@@ -41,6 +41,23 @@ async function readStore(req) {
   return { state, source: 'blob' };
 }
 
+// Series bundled with the deployment are merged into the store once each (by series id).
+// Deleting such a series afterwards is final: the id stays listed in state.seeds.
+function mergeSeeds(state) {
+  const b = PagesModel.upgrade(bundled());
+  state.seeds = Array.isArray(state.seeds) ? state.seeds : [];
+  let changed = false;
+  for (const sid of Object.keys(b.series)) {
+    if (state.seeds.includes(sid)) continue;
+    if (!state.series[sid]) {
+      state.series[sid] = b.series[sid];
+      for (const k of Object.keys(b.pages)) if (k.startsWith(sid + '/')) { state.pages[k] = b.pages[k]; state.meta[k] = b.meta[k] || {}; }
+    }
+    state.seeds.push(sid); changed = true;
+  }
+  return changed;
+}
+
 async function writeStore(state, req) {
   await put(BLOB_PATH, JSON.stringify(state), {
     access: 'public', addRandomSuffix: false, allowOverwrite: true,
@@ -63,6 +80,10 @@ module.exports = async (req, res) => {
   try {
     if (req.method === 'GET') {
       const url = new URL(req.url, 'http://x');
+      if (storeConfigured()) {
+        const cur = await readStore(req);
+        if (cur.source === 'blob' && mergeSeeds(cur.state)) await writeStore(cur.state, req);
+      }
       const selftest = url.searchParams.get('selftest');
       if (selftest != null) {
         // diagnostics: with the PIN, re-write the current state and read it back
@@ -82,6 +103,7 @@ module.exports = async (req, res) => {
     if (!pinOk(body.pin)) return res.status(401).json({ error: 'pin' });
     if (!storeConfigured()) return res.status(503).json({ error: 'no_store' });
     const { state: current } = await readStore(req);
+    mergeSeeds(current);
     const today = new Date().toLocaleDateString('he-IL', { timeZone: 'Asia/Jerusalem' });
     const r = PagesModel.apply(current, body, today);
     if (r.error) return res.status(400).json({ error: r.error });
