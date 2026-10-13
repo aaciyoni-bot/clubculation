@@ -155,7 +155,7 @@ select{font:15px var(--sans);padding:9px 12px;border:1px solid var(--line);borde
   </div>
 
   <div class="result" id="result" aria-live="polite">
-    <div class="hint">הקלד מספר צ' (או רק את הספרות האחרונות) והדף יופיע כאן.</div>
+    <div class="hint">הקלד את הצ' ספרה אחרי ספרה. בכל ספרה הרשימה מצטמצמת, וכשיש התאמה מלאה הדף מופיע בגדול.</div>
   </div>
   <ul class="matches" id="matches"></ul>
   <div class="more" id="more"></div>
@@ -273,7 +273,7 @@ select{font:15px var(--sans);padding:9px 12px;border:1px solid var(--line);borde
       var t=norm(q.value);
       matches.innerHTML=''; more.textContent='';
       if(!rows.length){ result.className='result'; result.innerHTML='<div class="hint">המאגר ריק. הוסף דף בסעיף "הוספת דף למאגר".</div>'; return; }
-      if(!t){ result.className='result'; result.innerHTML='<div class="hint">הקלד מספר צ\' (או רק את הספרות האחרונות) והדף יופיע כאן.</div>'; return; }
+      if(!t){ result.className='result'; result.innerHTML='<div class="hint">הקלד את הצ\' ספרה אחרי ספרה. בכל ספרה הרשימה מצטמצמת, וכשיש התאמה מלאה הדף מופיע בגדול.</div>'; return; }
       var exact=byExact.get(t)||[];
       if(exact.length){
         var r=exact[0];
@@ -281,18 +281,19 @@ select{font:15px var(--sans);padding:9px 12px;border:1px solid var(--line);borde
         result.innerHTML='<div class="label">'+esc(seriesName(r.sid))+' · נמצא בדף</div><div class="page">'+esc(r.p)+'<small>שורה '+r.i+'</small></div><div class="meta">צ\' <span class="num">'+esc(r.s)+'</span>'+(exact.length>1?' — מופיע גם ב: '+exact.slice(1).map(function(x){return esc(seriesName(x.sid))+' דף '+esc(x.p);}).join(', '):'')+'</div>';
       } else { result.className='result'; result.innerHTML=''; }
       var partial=[], n=0;
-      for(var k=0;k<rows.length;k++){ var row=rows[k]; if(row.s===t) continue; if(row.s.indexOf(t)!==-1){ n++; if(partial.length<LIMIT) partial.push(row); } }
-      partial.sort(function(a,b){ var ea=a.s.endsWith(t)?0:1, eb=b.s.endsWith(t)?0:1; return ea-eb || a.s.length-b.s.length; });
+      // prefix search: every digit typed narrows the list to serials that start with what was typed so far
+      for(var k=0;k<rows.length;k++){ var row=rows[k]; if(row.s===t) continue; if(row.s.indexOf(t)===0){ n++; if(partial.length<LIMIT) partial.push(row); } }
+      partial.sort(function(a,b){ return a.s<b.s?-1:a.s>b.s?1:0; });
       if(!exact.length){
         result.innerHTML = partial.length
-          ? '<div class="hint">אין התאמה מדויקת. '+n+' צ\' מכילים <b class="num">'+esc(t)+'</b>:</div>'
-          : '<div class="none">לא נמצא</div><div class="hint">אין צ\' שמכיל '+esc(t)+' באף דף.</div>';
+          ? '<div class="hint">'+n+' צ\' מתחילים ב-<b class="num">'+esc(t)+'</b>. המשך להקליד כדי לצמצם:</div>'
+          : '<div class="none">לא נמצא</div><div class="hint">אין צ\' שמתחיל ב-'+esc(t)+' באף דף.</div>';
       }
       matches.innerHTML=partial.map(function(r){
-        var i=r.s.indexOf(t), hl=esc(r.s.slice(0,i))+'<mark>'+esc(t)+'</mark>'+esc(r.s.slice(i+t.length));
+        var hl='<mark>'+esc(t)+'</mark>'+esc(r.s.slice(t.length));
         return '<li tabindex="0" data-s="'+esc(r.s)+'"><span class="serial">'+hl+'</span><span class="pg">'+where(r)+'</span></li>';
       }).join('');
-      if(n>LIMIT) more.textContent='מוצגים '+LIMIT+' מתוך '+n+'. הקלד עוד ספרות כדי לצמצם.';
+      if(n>LIMIT) more.textContent='מוצגים '+LIMIT+' מתוך '+n+'. הקלד את הספרה הבאה כדי לצמצם.';
     }
     q.addEventListener('input',search);
     function pick(e){ var li=e.target.closest('li'); if(li){ q.value=li.getAttribute('data-s'); search(); q.focus(); } }

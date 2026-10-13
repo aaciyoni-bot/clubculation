@@ -72,6 +72,14 @@ function mergeSeeds(state) {
     }
     state.seeds.push(sid); changed = true;
   }
+  // series retired by the deployment (seed.json "purge"): removed once, never re-created
+  for (const sid of (SEED && Array.isArray(SEED.purge) ? SEED.purge : [])) {
+    const mark = 'purge:' + sid;
+    if (state.seeds.includes(mark)) continue;
+    const r = PagesModel.apply(state, { action: 'deleteSeries', seriesId: sid }, '');
+    if (r.state) { state.series = r.state.series; state.pages = r.state.pages; state.meta = r.state.meta; }
+    state.seeds.push(mark); changed = true;
+  }
   return changed;
 }
 
