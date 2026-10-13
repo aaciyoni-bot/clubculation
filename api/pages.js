@@ -2,8 +2,6 @@
 // Storage: Vercel Blob (BLOB_READ_WRITE_TOKEN is injected when a Blob store is connected to the project).
 // Until a store is connected, GET serves the list bundled with the deployment and POST reports 503.
 const { put, list } = require('@vercel/blob');
-const fs = require('fs');
-const path = require('path');
 const crypto = require('crypto');
 const { PagesModel } = require('../src/model.js');
 let getVercelOidcToken = null;
@@ -22,13 +20,19 @@ async function blobOpts(req) {
 
 const BLOB_PATH = 'weapon-pages/pages.json';
 
+let SEED = null;
+try { SEED = require('../src/seed.json'); } catch (e) { SEED = null; }
+// The series bundled with this deployment (src/seed.json), as a v2 state.
 function bundled() {
-  try {
-    const html = fs.readFileSync(path.join(process.cwd(), 'public', 'index.html'), 'utf8');
-    const m = html.match(/<script id="pages-data" type="application\/json">([\s\S]*?)<\/script>/);
-    if (m) return JSON.parse(m[1]);
-  } catch (e) {}
-  return PagesModel.empty();
+  const st = PagesModel.empty();
+  if (SEED && SEED.id && SEED.pages) {
+    st.series[SEED.id] = { name: SEED.name, created: SEED.created };
+    for (const pg of Object.keys(SEED.pages)) {
+      st.pages[SEED.id + '/' + pg] = SEED.pages[pg];
+      st.meta[SEED.id + '/' + pg] = { added: SEED.created, src: SEED.src || 'manual' };
+    }
+  }
+  return st;
 }
 
 async function readStore(req) {
