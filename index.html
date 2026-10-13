@@ -100,6 +100,9 @@ ul.matches li{display:flex;justify-content:space-between;align-items:center;gap:
 ul.matches li:hover,ul.matches li:focus{border-color:var(--accent);outline:none}
 ul.matches .serial{font-family:var(--mono);direction:ltr;font-weight:700;font-size:18px;letter-spacing:.06em}
 ul.matches .serial mark{background:var(--hit);color:inherit;padding:0 1px;border-radius:2px}
+ul.matches .serial mark.diff{background:var(--warn-bg);color:var(--warn);text-decoration:underline}
+ul.matches li.similar{border-style:dashed}
+ul.matches .badge{font:700 11px var(--sans);font-style:normal;color:var(--warn);background:var(--warn-bg);border-radius:999px;padding:2px 8px;margin-inline-end:6px;vertical-align:middle}
 ul.matches .pg{font-weight:900;font-size:18px;font-variant-numeric:tabular-nums}
 ul.matches .pg span{font-size:13px;color:var(--muted);font-weight:500;margin-inline-end:4px}
 .more{font-size:13px;color:var(--muted);margin-top:6px}
@@ -267,7 +270,32 @@ select{font:15px var(--sans);padding:9px 12px;border:1px solid var(--line);borde
     }
 
     // ---- search ----
-    var LIMIT=40;
+    var LIMIT=40, SIMILAR_LIMIT=10;
+    // bounded Damerau-Levenshtein distance (substitution, insertion, deletion, adjacent swap); returns max+1 when over
+    function dist(a,b,max){
+      if(Math.abs(a.length-b.length)>max) return max+1;
+      var prev2=null, prev=[], cur, i, j;
+      for(j=0;j<=b.length;j++) prev.push(j);
+      for(i=1;i<=a.length;i++){
+        cur=[i]; var rowMin=i;
+        for(j=1;j<=b.length;j++){
+          var c=a[i-1]===b[j-1]?0:1;
+          var v=Math.min(prev[j]+1, cur[j-1]+1, prev[j-1]+c);
+          if(i>1&&j>1&&a[i-1]===b[j-2]&&a[i-2]===b[j-1]) v=Math.min(v, prev2[j-2]+1);
+          cur.push(v); if(v<rowMin) rowMin=v;
+        }
+        if(rowMin>max) return max+1;
+        prev2=prev; prev=cur;
+      }
+      return prev[b.length];
+    }
+    function similar(t){
+      if(t.length<5) return [];
+      var max = t.length>=7 ? 2 : 1, out=[];
+      for(var k=0;k<rows.length;k++){ var r=rows[k]; if(r.s===t||r.s.indexOf(t)===0) continue; var d=dist(t,r.s,max); if(d<=max) out.push({r:r,d:d}); }
+      out.sort(function(a,b){ return a.d-b.d || (a.r.s<b.r.s?-1:1); });
+      return out.slice(0,SIMILAR_LIMIT).map(function(x){ return x.r; });
+    }
     function where(r){ return '<span>'+esc(seriesName(r.sid))+' · דף</span>'+esc(r.p); }
     function search(){
       var t=norm(q.value);
@@ -284,14 +312,21 @@ select{font:15px var(--sans);padding:9px 12px;border:1px solid var(--line);borde
       // prefix search: every digit typed narrows the list to serials that start with what was typed so far
       for(var k=0;k<rows.length;k++){ var row=rows[k]; if(row.s===t) continue; if(row.s.indexOf(t)===0){ n++; if(partial.length<LIMIT) partial.push(row); } }
       partial.sort(function(a,b){ return a.s<b.s?-1:a.s>b.s?1:0; });
+      var sim=similar(t);
       if(!exact.length){
         result.innerHTML = partial.length
           ? '<div class="hint">'+n+' צ\' מתחילים ב-<b class="num">'+esc(t)+'</b>. המשך להקליד כדי לצמצם:</div>'
-          : '<div class="none">לא נמצא</div><div class="hint">אין צ\' שמתחיל ב-'+esc(t)+' באף דף.</div>';
+          : sim.length
+            ? '<div class="none">לא נמצא בדיוק</div><div class="hint">אין צ\' שמתחיל ב-'+esc(t)+', אבל יש מספרים דומים (הבדל של ספרה או שתיים):</div>'
+            : '<div class="none">לא נמצא</div><div class="hint">אין צ\' שמתחיל ב-'+esc(t)+' באף דף, וגם לא מספר דומה.</div>';
       }
       matches.innerHTML=partial.map(function(r){
         var hl='<mark>'+esc(t)+'</mark>'+esc(r.s.slice(t.length));
         return '<li tabindex="0" data-s="'+esc(r.s)+'"><span class="serial">'+hl+'</span><span class="pg">'+where(r)+'</span></li>';
+      }).join('') + sim.map(function(r){
+        // highlight the digits that differ from what was typed (same-length case)
+        var hl = r.s.length===t.length ? r.s.split('').map(function(ch,i){ return ch===t[i]?esc(ch):'<mark class="diff">'+esc(ch)+'</mark>'; }).join('') : esc(r.s);
+        return '<li tabindex="0" class="similar" data-s="'+esc(r.s)+'"><span class="serial">'+hl+'</span><span class="pg"><em class="badge">דומה</em>'+where(r)+'</span></li>';
       }).join('');
       if(n>LIMIT) more.textContent='מוצגים '+LIMIT+' מתוך '+n+'. הקלד את הספרה הבאה כדי לצמצם.';
     }
@@ -494,12 +529,12 @@ select{font:15px var(--sans);padding:9px 12px;border:1px solid var(--line);borde
       if(dupIn.length) problems.push('כפילות בתוך הדף: '+dupIn.join(', '));
       var elsewhere=[]; list.forEach(function(x){ (byExact.get(x)||[]).forEach(function(r){ if(!(r.sid===sid && r.p===p)) elsewhere.push(x+' ('+seriesName(r.sid)+' דף '+r.p+')'); }); });
       if(elsewhere.length) problems.push('כבר קיימים במאגר: '+elsewhere.slice(0,8).join(', ')+(elsewhere.length>8?' ועוד':''));
-      var odd=list.filter(function(x){return x.length!==7;});
-      if(odd.length) problems.push('לא 7 ספרות: '+odd.slice(0,8).join(', '));
+      var odd=list.filter(function(x){return x.length<5||x.length>8;});
+      if(odd.length) problems.push('אורך חריג (לא 5 עד 8 ספרות): '+odd.slice(0,8).join(', '));
       if(sid && p && STATE.pages[M.key(sid,p)]) problems.push('דף '+p+' כבר קיים בסדרה "'+sname+'" עם '+STATE.pages[M.key(sid,p)].length+' צ\'. שמירה תחליף אותו.');
       if(!sid && sname){ var clash=seriesIds().filter(function(x){ return seriesName(x)===sname; }); if(clash.length) problems.push('כבר יש סדרה בשם "'+sname+'". אם התכוונת אליה, בחר אותה ברשימה במקום ליצור חדשה.'); }
       if(problems.length){ note.hidden=false; note.className='note'; note.innerHTML=problems.map(esc).join('<br>'); }
-      else if(note.className==='note' && /כפילות|מסומנות|קיימים|ספרות|כבר קיים|כבר יש/.test(note.textContent)) note.hidden=true;
+      else if(note.className==='note' && /כפילות|מסומנות|קיימים|אורך חריג|כבר קיים|כבר יש/.test(note.textContent)) note.hidden=true;
       $('save').disabled=!(p && list.length && sname && canWrite && backend && (!backend.needsPin || pinEl.value));
     }
     $('pageNum').addEventListener('input',review);
