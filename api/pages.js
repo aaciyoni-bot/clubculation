@@ -1,7 +1,7 @@
 // Shared page store: GET returns {pages, meta}; POST (with the edit PIN) replaces or deletes one page.
 // Storage: Vercel Blob (BLOB_READ_WRITE_TOKEN is injected when a Blob store is connected to the project).
 // Until a store is connected, GET serves the list bundled with the deployment and POST reports 503.
-const { put, list } = require('@vercel/blob');
+const { put, list, del } = require('@vercel/blob');
 const crypto = require('crypto');
 const { PagesModel } = require('../src/model.js');
 let getVercelOidcToken = null;
@@ -18,7 +18,12 @@ async function blobOpts(req) {
   return t ? { oidcToken: t, storeId: process.env.BLOB_STORE_ID } : {};
 }
 
-const BLOB_PATH = 'weapon-pages/pages.json';
+// Every write goes to a NEW versioned path: public blob URLs are CDN-cached (60 s minimum), so re-reading
+// the same URL right after a write can return stale data and a later save would then drop the earlier one.
+// A fresh URL per version is never cached; list() (an API call) finds the newest.
+const BLOB_PREFIX = 'weapon-pages/pages-';
+const LEGACY_PATH = 'weapon-pages/pages.json';
+const KEEP_VERSIONS = 5;
 
 let SEED = null;
 try { SEED = require('../src/seed.json'); } catch (e) { SEED = null; }
@@ -35,11 +40,19 @@ function bundled() {
   return st;
 }
 
+async function latestBlob(req) {
+  const opts = await blobOpts(req);
+  const { blobs } = await list({ prefix: BLOB_PREFIX, limit: 1000, ...opts });
+  if (blobs.length) return blobs.reduce((x, y) => (x.pathname > y.pathname ? x : y));
+  const legacy = await list({ prefix: LEGACY_PATH, limit: 1, ...opts });
+  return legacy.blobs[0] || null;
+}
+
 async function readStore(req) {
   if (!storeConfigured()) return { state: bundled(), source: 'bundled' };
-  const { blobs } = await list({ prefix: BLOB_PATH, limit: 1, ...(await blobOpts(req)) });
-  if (!blobs.length) return { state: bundled(), source: 'bundled' };
-  const res = await fetch(blobs[0].url + '?t=' + Date.now(), { cache: 'no-store' });
+  const blob = await latestBlob(req);
+  if (!blob) return { state: bundled(), source: 'bundled' };
+  const res = await fetch(blob.url + '?t=' + Date.now(), { cache: 'no-store' });
   if (!res.ok) throw new Error('blob read failed ' + res.status);
   const state = PagesModel.upgrade(await res.json());
   return { state, source: 'blob' };
@@ -63,11 +76,18 @@ function mergeSeeds(state) {
 }
 
 async function writeStore(state, req) {
-  await put(BLOB_PATH, JSON.stringify(state), {
-    access: 'public', addRandomSuffix: false, allowOverwrite: true,
-    contentType: 'application/json', cacheControlMaxAge: 60,
-    ...(await blobOpts(req)),
+  const opts = await blobOpts(req);
+  const name = BLOB_PREFIX + String(Date.now()).padStart(14, '0') + '.json';
+  await put(name, JSON.stringify(state), {
+    access: 'public', addRandomSuffix: false, allowOverwrite: false,
+    contentType: 'application/json', cacheControlMaxAge: 60, ...opts,
   });
+  // best-effort cleanup of old versions (a few are kept as a safety net)
+  try {
+    const { blobs } = await list({ prefix: BLOB_PREFIX, limit: 1000, ...opts });
+    const old = blobs.map((x) => x.pathname).sort().slice(0, -KEEP_VERSIONS);
+    if (old.length) await del(old, opts);
+  } catch (e) { console.warn('cleanup failed', e && e.message); }
 }
 
 function pinOk(given) {
